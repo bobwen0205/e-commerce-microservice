@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package product;
+
+option java_package = "com.bob.product.proto";
+option java_multiple_files = true;
+
+service ProductService {
+  rpc GetProductById (GetProductRequest) returns (Product);
+  rpc ListProducts (ListProductsRequest) returns (ListProductsResponse);
+}
+
+message GetProductRequest {
+  string productId = 1;
+}
+
+message ListProductsRequest {
+  repeated string productIds = 1;  // for cart/billing bulk fetch
+}
+
+message ListProductsResponse {
+  repeated Product products = 1;
+}
+
+message Product {
+  string id = 1;
+  string name = 2;
+  string brand = 3;
+  string description = 4;
+  string price = 5;  // BigDecimal stored as string
+  int32 inventory = 6;
+  string categoryName = 7;
+}
