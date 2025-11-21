@@ -29,44 +29,45 @@ public class CartServiceImpl implements CartService {
 
     @Override
     public CartResponseDTO addItemToCart(String userId, AddToCartRequestDTO request) {
-        Cart cart = cartRepository.findByUserId(userId).orElse(new Cart());
-        if (cart.getUserId() == null) {
-            cart.setUserId(userId);
-        }
+        // Use atomic updateCart (Optimistic Locking)
+        Cart updatedCart = cartRepository.updateCart(userId, cart -> {
+            if (cart.getUserId() == null) {
+                cart.setUserId(userId);
+            }
 
-        // Check if item exists in cart
-        Optional<CartItem> existingItem = cart.getItems().stream()
-                .filter(item -> item.getProductId().equals(request.getProductId()))
-                .findFirst();
+            // Check if item exists in cart
+            Optional<CartItem> existingItem = cart.getItems().stream()
+                    .filter(item -> item.getProductId().equals(request.getProductId()))
+                    .findFirst();
 
-        if (existingItem.isPresent()) {
-            CartItem item = existingItem.get();
-            item.setQuantity(item.getQuantity() + request.getQuantity());
-        } else {
-            // Fetch product details from Product Service via gRPC
-            Product productProto = productGrpcClient.getProduct(request.getProductId());
+            if (existingItem.isPresent()) {
+                CartItem item = existingItem.get();
+                item.setQuantity(item.getQuantity() + request.getQuantity());
+            } else {
+                // Fetch product details from Product Service via gRPC
+                // Note: In optimistic locking, this might happen multiple times if retried
+                Product productProto = productGrpcClient.getProduct(request.getProductId());
 
-            CartItem newItem = new CartItem();
-            newItem.setProductId(productProto.getId());
-            newItem.setName(productProto.getName());
-            newItem.setBrand(productProto.getBrand());
-            // Proto sends price as String, convert to BigDecimal
-            newItem.setPrice(new BigDecimal(productProto.getPrice()));
-            newItem.setQuantity(request.getQuantity());
-            // Logic for image URL if available in proto, otherwise null
-            // newItem.setImageUrl(...);
-            newItem.setAvailable(productProto.getInventory() > 0);
+                CartItem newItem = new CartItem();
+                newItem.setProductId(productProto.getId());
+                newItem.setName(productProto.getName());
+                newItem.setBrand(productProto.getBrand());
+                // Proto sends price as String, convert to BigDecimal
+                newItem.setPrice(new BigDecimal(productProto.getPrice()));
+                newItem.setQuantity(request.getQuantity());
+                newItem.setAvailable(productProto.getInventory() > 0);
 
-            cart.getItems().add(newItem);
+                cart.getItems().add(newItem);
 
-            // Add to Index
-            cartRepository.addProductToCartIndex(request.getProductId(), userId);
-        }
+                // Add to Index (Idempotent)
+                cartRepository.addProductToCartIndex(request.getProductId(), userId);
+            }
 
-        calculateTotals(cart);
-        cartRepository.save(cart);
+            calculateTotals(cart);
+            return cart;
+        });
 
-        return mapToResponse(cart);
+        return mapToResponse(updatedCart);
     }
 
     @Override
@@ -79,20 +80,19 @@ public class CartServiceImpl implements CartService {
 
     @Override
     public CartResponseDTO removeItemFromCart(String userId, String productId) {
-        Cart cart = cartRepository.findByUserId(userId)
-                .orElseThrow(() -> new ResourceNotFoundException("Cart not found"));
+        Cart updatedCart = cartRepository.updateCart(userId, cart -> {
+            boolean removed = cart.getItems().removeIf(item -> item.getProductId().equals(productId));
 
-        boolean removed = cart.getItems().removeIf(item -> item.getProductId().equals(productId));
+            if (removed) {
+                // Remove from Index
+                cartRepository.removeProductFromCartIndex(productId, userId);
+            }
 
-        if (removed) {
-            // Remove from Index
-            cartRepository.removeProductFromCartIndex(productId, userId);
-        }
+            calculateTotals(cart);
+            return cart;
+        });
 
-        calculateTotals(cart);
-        cartRepository.save(cart);
-
-        return mapToResponse(cart);
+        return mapToResponse(updatedCart);
     }
 
     @Override
@@ -100,39 +100,16 @@ public class CartServiceImpl implements CartService {
         cartRepository.delete(userId);
     }
 
-    private void calculateTotals(Cart cart) {
-        int totalQty = 0;
-        BigDecimal totalAmt = BigDecimal.ZERO;
-
-        for (CartItem item : cart.getItems()) {
-            totalQty += item.getQuantity();
-            BigDecimal itemTotal = item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
-            totalAmt = totalAmt.add(itemTotal);
-        }
-
-        cart.setTotalQuantity(totalQty);
-        cart.setTotalAmount(totalAmt);
-    }
-
-    private CartResponseDTO mapToResponse(Cart cart) {
-        return CartResponseDTO.builder()
-                .userId(cart.getUserId())
-                .items(cart.getItems())
-                .totalAmount(cart.getTotalAmount())
-                .totalQuantity(cart.getTotalQuantity())
-                .build();
-    }
-
-    // METHOD called by KafkaConsumer
+    // METHOD called by KafkaConsumer (Concurrent Updates handled)
     @Override
     public void handleProductUpdate(com.bob.product.proto.Product event) {
         // 1. Find all users who have this product in their cart
         Set<String> userIds = cartRepository.getUsersWithProduct(event.getId());
 
         for (String userId : userIds) {
-            cartRepository.findByUserId(userId).ifPresent(cart -> {
+            cartRepository.updateCart(userId, cart -> {
                 boolean changed = false;
-                BigDecimal newPrice = new BigDecimal(event.getPrice()); // Proto string -> BigDecimal
+                BigDecimal newPrice = new BigDecimal(event.getPrice());
                 int newInventory = event.getInventory();
 
                 Iterator<CartItem> iterator = cart.getItems().iterator();
@@ -156,8 +133,8 @@ public class CartServiceImpl implements CartService {
 
                 if (changed) {
                     calculateTotals(cart);
-                    cartRepository.save(cart);
                 }
+                return cart;
             });
         }
     }
@@ -165,95 +142,124 @@ public class CartServiceImpl implements CartService {
     // Method to handle checkout validation
     @Override
     public CartResponseDTO validateCartForCheckout(String userId) {
-        Cart cart = cartRepository.findByUserId(userId)
-                .orElseThrow(() -> new ResourceNotFoundException("Cart not found"));
-
-        if (cart.getItems().isEmpty()) {
-            throw new ResourceNotFoundException("Cart is empty");
-        }
-
-        // 1. Prepare Request for gRPC
-        List<CartItemRequest> protoItems = cart.getItems().stream()
-                .map(item -> CartItemRequest.newBuilder()
-                        .setProductId(item.getProductId())
-                        .setQuantity(item.getQuantity())
-                        .build())
-                .toList();
-
-        // 2. Call Product Service (Step 4)
-        ValidateCartItemsResponse response = productGrpcClient.validateCartItems(protoItems);
-
-        // 3. Process Results (Step 7)
-        boolean cartChanged = false;
+        // List to capture invalid items during the atomic update
+        // We clear this at the start of the lambda to handle retries correctly
         List<String> invalidItemIds = new ArrayList<>();
 
-        for (CartItemValidationResult result : response.getResultsList()) {
-            String productId = result.getProductId();
+        Cart updatedCart = cartRepository.updateCart(userId, cart -> {
+            invalidItemIds.clear(); // Reset for retry
 
-            // Find item in current cart
-            Optional<CartItem> cartItemOpt = cart.getItems().stream()
-                    .filter(i -> i.getProductId().equals(productId))
-                    .findFirst();
+            if (cart.getItems().isEmpty()) {
+                return cart; // Empty cart is valid (or handle as exception outside)
+            }
 
-            if (cartItemOpt.isPresent()) {
-                CartItem item = cartItemOpt.get();
+            // 1. Prepare Request for gRPC
+            List<CartItemRequest> protoItems = cart.getItems().stream()
+                    .map(item -> CartItemRequest.newBuilder()
+                            .setProductId(item.getProductId())
+                            .setQuantity(item.getQuantity())
+                            .build())
+                    .toList();
 
-                if (!result.getValid()) {
-                    // Case: Invalid (Inactive or No Stock) -> Remove item
-                    cart.getItems().remove(item);
-                    cartRepository.removeProductFromCartIndex(productId, userId);
-                    cartChanged = true;
-                    invalidItemIds.add(productId + " (" + result.getMessage() + ")");
-                } else {
-                    // Case: Valid, but check for price change
-                    BigDecimal currentPrice = new BigDecimal(result.getCurrentPrice());
-                    if (item.getPrice().compareTo(currentPrice) != 0) {
-                        item.setPrice(currentPrice);
+            // 2. Call Product Service
+            ValidateCartItemsResponse response = productGrpcClient.validateCartItems(protoItems);
+
+            // 3. Process Results
+            boolean cartChanged = false;
+
+            for (CartItemValidationResult result : response.getResultsList()) {
+                String productId = result.getProductId();
+
+                Optional<CartItem> cartItemOpt = cart.getItems().stream()
+                        .filter(i -> i.getProductId().equals(productId))
+                        .findFirst();
+
+                if (cartItemOpt.isPresent()) {
+                    CartItem item = cartItemOpt.get();
+
+                    if (!result.getValid()) {
+                        // Invalid -> Remove
+                        cart.getItems().remove(item);
+                        cartRepository.removeProductFromCartIndex(productId, userId);
                         cartChanged = true;
+                        invalidItemIds.add(productId + " (" + result.getMessage() + ")");
+                    } else {
+                        // Valid -> Check Price
+                        BigDecimal currentPrice = new BigDecimal(result.getCurrentPrice());
+                        if (item.getPrice().compareTo(currentPrice) != 0) {
+                            item.setPrice(currentPrice);
+                            cartChanged = true;
+                        }
                     }
                 }
             }
+
+            if (cartChanged) {
+                calculateTotals(cart);
+            }
+            return cart;
+        });
+
+        // 4. Post-transaction check
+        // If invalid items were found, the cart was updated and saved.
+        // Now we throw the exception to notify the user.
+        if (!invalidItemIds.isEmpty()) {
+            throw new CartValidationException("Cart items were updated during validation",
+                    invalidItemIds,
+                    mapToResponse(updatedCart));
         }
 
-        // 4. Save and Return
-        if (cartChanged) {
-            calculateTotals(cart);
-            cartRepository.save(cart);
-
-            // [Step 8] Return specific error/status indicating cart has changed
-            // We throw a custom exception or handle it in Controller.
-            // For simplicity, we can throw a runtime exception that maps to 400.
-            throw new CartValidationException("Cart items were updated during validation", invalidItemIds, mapToResponse(cart));
+        if (updatedCart.getItems().isEmpty()) {
+            throw new ResourceNotFoundException("Cart is empty");
         }
 
-        return mapToResponse(cart);
+        return mapToResponse(updatedCart);
     }
 
+    // Method to handle Product Deletion Event
     @Override
     public void handleProductDeletion(String productId) {
-        // 1. Use the Index to find ONLY relevant users (Avoids scanning all keys)
-        //
+        // 1. Use Index to find relevant users
         Set<String> userIds = cartRepository.getUsersWithProduct(productId);
 
         log.info("Removing deleted product {} from {} active carts", productId, userIds.size());
 
         for (String userId : userIds) {
-            cartRepository.findByUserId(userId).ifPresent(cart -> {
-
-                // Remove item
+            cartRepository.updateCart(userId, cart -> {
                 boolean removed = cart.getItems().removeIf(item -> item.getProductId().equals(productId));
 
                 if (removed) {
-                    // Recalculate totals (Total Amount, Total Quantity)
                     calculateTotals(cart);
-
-                    // Save updated cart
-                    cartRepository.save(cart);
-
                     // Clean up the index for this specific user/product pair
                     cartRepository.removeProductFromCartIndex(productId, userId);
                 }
+                return cart;
             });
         }
+    }
+
+    // --- Helper Methods ---
+
+    private void calculateTotals(Cart cart) {
+        int totalQty = 0;
+        BigDecimal totalAmt = BigDecimal.ZERO;
+
+        for (CartItem item : cart.getItems()) {
+            totalQty += item.getQuantity();
+            BigDecimal itemTotal = item.getPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
+            totalAmt = totalAmt.add(itemTotal);
+        }
+
+        cart.setTotalQuantity(totalQty);
+        cart.setTotalAmount(totalAmt);
+    }
+
+    private CartResponseDTO mapToResponse(Cart cart) {
+        return CartResponseDTO.builder()
+                .userId(cart.getUserId())
+                .items(cart.getItems())
+                .totalAmount(cart.getTotalAmount())
+                .totalQuantity(cart.getTotalQuantity())
+                .build();
     }
 }
