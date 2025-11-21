@@ -2,19 +2,21 @@ package com.bob.cartservice.service;
 
 import com.bob.cartservice.dto.AddToCartRequestDTO;
 import com.bob.cartservice.dto.CartResponseDTO;
+import com.bob.cartservice.exception.CartValidationException;
 import com.bob.cartservice.exception.ResourceNotFoundException;
 import com.bob.cartservice.grpc.ProductGrpcClient;
 import com.bob.cartservice.model.Cart;
 import com.bob.cartservice.model.CartItem;
 import com.bob.cartservice.repository.RedisCartRepository;
+import com.bob.product.proto.CartItemRequest;
+import com.bob.product.proto.CartItemValidationResult;
 import com.bob.product.proto.Product;
+import com.bob.product.proto.ValidateCartItemsResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.util.Iterator;
-import java.util.Optional;
-import java.util.Set;
+import java.util.*;
 
 @Service
 @RequiredArgsConstructor
@@ -156,5 +158,72 @@ public class CartServiceImpl implements CartService {
                 }
             });
         }
+    }
+
+    // Method to handle checkout validation
+    @Override
+    public CartResponseDTO validateCartForCheckout(String userId) {
+        Cart cart = cartRepository.findByUserId(userId)
+                .orElseThrow(() -> new ResourceNotFoundException("Cart not found"));
+
+        if (cart.getItems().isEmpty()) {
+            throw new ResourceNotFoundException("Cart is empty");
+        }
+
+        // 1. Prepare Request for gRPC
+        List<CartItemRequest> protoItems = cart.getItems().stream()
+                .map(item -> CartItemRequest.newBuilder()
+                        .setProductId(item.getProductId())
+                        .setQuantity(item.getQuantity())
+                        .build())
+                .toList();
+
+        // 2. Call Product Service (Step 4)
+        ValidateCartItemsResponse response = productGrpcClient.validateCartItems(protoItems);
+
+        // 3. Process Results (Step 7)
+        boolean cartChanged = false;
+        List<String> invalidItemIds = new ArrayList<>();
+
+        for (CartItemValidationResult result : response.getResultsList()) {
+            String productId = result.getProductId();
+
+            // Find item in current cart
+            Optional<CartItem> cartItemOpt = cart.getItems().stream()
+                    .filter(i -> i.getProductId().equals(productId))
+                    .findFirst();
+
+            if (cartItemOpt.isPresent()) {
+                CartItem item = cartItemOpt.get();
+
+                if (!result.getValid()) {
+                    // Case: Invalid (Inactive or No Stock) -> Remove item
+                    cart.getItems().remove(item);
+                    cartRepository.removeProductFromCartIndex(productId, userId);
+                    cartChanged = true;
+                    invalidItemIds.add(productId + " (" + result.getMessage() + ")");
+                } else {
+                    // Case: Valid, but check for price change
+                    BigDecimal currentPrice = new BigDecimal(result.getCurrentPrice());
+                    if (item.getPrice().compareTo(currentPrice) != 0) {
+                        item.setPrice(currentPrice);
+                        cartChanged = true;
+                    }
+                }
+            }
+        }
+
+        // 4. Save and Return
+        if (cartChanged) {
+            calculateTotals(cart);
+            cartRepository.save(cart);
+
+            // [Step 8] Return specific error/status indicating cart has changed
+            // We throw a custom exception or handle it in Controller.
+            // For simplicity, we can throw a runtime exception that maps to 400.
+            throw new CartValidationException("Cart items were updated during validation", invalidItemIds, mapToResponse(cart));
+        }
+
+        return mapToResponse(cart);
     }
 }

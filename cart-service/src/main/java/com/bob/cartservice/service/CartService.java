@@ -14,4 +14,7 @@ public interface CartService {
 
     // METHOD called by KafkaConsumer
     void handleProductUpdate(com.bob.product.proto.Product event);
+
+    // Method to handle checkout validation
+    CartResponseDTO validateCartForCheckout(String userId);
 }

@@ -1,9 +1,6 @@
 package com.bob.productservice.grpc;
 
-import com.bob.product.proto.GetProductRequest;
-import com.bob.product.proto.ListProductsRequest;
-import com.bob.product.proto.ListProductsResponse;
-import com.bob.product.proto.ProductServiceGrpc;
+import com.bob.product.proto.*;
 import com.bob.productservice.model.Product;
 import com.bob.productservice.repository.ProductRepository;
 import io.grpc.stub.StreamObserver;
@@ -11,7 +8,9 @@ import lombok.RequiredArgsConstructor;
 import net.devh.boot.grpc.server.service.GrpcService;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @GrpcService
@@ -64,6 +63,69 @@ public class ProductGrpcServiceImpl extends ProductServiceGrpc.ProductServiceImp
         responseObserver.onNext(response);
         responseObserver.onCompleted();
     }
+
+    @Override
+    public void validateCartItems(ValidateCartItemsRequest request,
+                                  StreamObserver<ValidateCartItemsResponse> responseObserver) {
+
+        // 1. Extract IDs from request
+        List<UUID> productIds = request.getItemsList().stream()
+                .map(item -> UUID.fromString(item.getProductId()))
+                .collect(Collectors.toList());
+
+        // 2. Bulk Fetch from DB
+        Map<UUID, Product> productMap = productRepository.findAllById(productIds).stream()
+                .collect(Collectors.toMap(Product::getId, Function.identity()));
+
+        // 3. Validate each item
+        List<CartItemValidationResult> results = request.getItemsList().stream().map(item -> {
+            UUID id = UUID.fromString(item.getProductId());
+            Product product = productMap.get(id);
+
+            CartItemValidationResult.Builder resultBuilder = CartItemValidationResult.newBuilder()
+                    .setProductId(item.getProductId());
+
+            if (product == null) {
+                return resultBuilder
+                        .setValid(false)
+                        .setMessage("PRODUCT_NOT_FOUND")
+                        .build();
+            }
+
+            if (!product.isActive()) {
+                return resultBuilder
+                        .setValid(false)
+                        .setMessage("PRODUCT_INACTIVE")
+                        .build();
+            }
+
+            if (product.getInventory() < item.getQuantity()) {
+                return resultBuilder
+                        .setValid(false)
+                        .setMessage("INSUFFICIENT_INVENTORY")
+                        .setAvailableQuantity(product.getInventory())
+                        .setCurrentPrice(product.getPrice().toString())
+                        .build();
+            }
+
+            // Valid
+            return resultBuilder
+                    .setValid(true)
+                    .setCurrentPrice(product.getPrice().toString())
+                    .setAvailableQuantity(product.getInventory())
+                    .build();
+
+        }).collect(Collectors.toList());
+
+        // 4. Send Response
+        ValidateCartItemsResponse response = ValidateCartItemsResponse.newBuilder()
+                .addAllResults(results)
+                .build();
+
+        responseObserver.onNext(response);
+        responseObserver.onCompleted();
+    }
+
 
     private com.bob.product.proto.Product mapToProto(Product product) {
         return com.bob.product.proto.Product.newBuilder()

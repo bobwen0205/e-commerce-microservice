@@ -30,6 +30,9 @@ public class Product {
     @NotNull
     private String description;
 
+    @Builder.Default
+    private boolean active = true;
+
     @NotNull
     @ManyToOne(cascade = {CascadeType.MERGE, CascadeType.DETACH, CascadeType.REFRESH, CascadeType.PERSIST})
     @JoinColumn(name = "category_id")

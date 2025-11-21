@@ -8,6 +8,7 @@ option java_multiple_files = true;
 service ProductService {
   rpc GetProductById (GetProductRequest) returns (Product);
   rpc ListProducts (ListProductsRequest) returns (ListProductsResponse);
+  rpc ValidateCartItems (ValidateCartItemsRequest) returns (ValidateCartItemsResponse);
 }
 
 message GetProductRequest {
@@ -30,4 +31,25 @@ message Product {
   string price = 5;  // BigDecimal stored as string
   int32 inventory = 6;
   string categoryName = 7;
+}
+
+message ValidateCartItemsRequest {
+  repeated CartItemRequest items = 1;
+}
+
+message CartItemRequest {
+  string productId = 1;
+  int32 quantity = 2;
+}
+
+message ValidateCartItemsResponse {
+  repeated CartItemValidationResult results = 1;
+}
+
+message CartItemValidationResult {
+  string productId = 1;
+  bool valid = 2;
+  string message = 3; // e.g. "PRODUCT_INACTIVE", "INSUFFICIENT_INVENTORY"
+  string currentPrice = 4; // To handle price changes
+  int32 availableQuantity = 5;
 }

@@ -1,10 +1,10 @@
 package com.bob.cartservice.grpc;
 
-import com.bob.product.proto.GetProductRequest;
-import com.bob.product.proto.Product;
-import com.bob.product.proto.ProductServiceGrpc;
+import com.bob.product.proto.*;
 import net.devh.boot.grpc.client.inject.GrpcClient;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
 
 @Service
 public class ProductGrpcClient {
@@ -18,5 +18,12 @@ public class ProductGrpcClient {
                 .setProductId(productId)
                 .build();
         return productServiceBlockingStub.getProductById(request);
+    }
+
+    public ValidateCartItemsResponse validateCartItems(List<CartItemRequest> items) {
+        ValidateCartItemsRequest request = ValidateCartItemsRequest.newBuilder()
+                .addAllItems(items)
+                .build();
+        return productServiceBlockingStub.validateCartItems(request);
     }
 }
