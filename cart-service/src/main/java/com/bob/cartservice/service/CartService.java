@@ -17,4 +17,6 @@ public interface CartService {
 
     // Method to handle checkout validation
     CartResponseDTO validateCartForCheckout(String userId);
+
+    void handleProductDeletion(String productId);
 }

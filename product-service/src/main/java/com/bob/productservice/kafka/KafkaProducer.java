@@ -1,10 +1,13 @@
 package com.bob.productservice.kafka;
 
 import com.bob.product.proto.Product;
+import com.bob.product.proto.ProductDeletedEvent;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
+
+import java.time.Instant;
 
 @Service
 @RequiredArgsConstructor
@@ -30,6 +33,25 @@ public class KafkaProducer {
             kafkaTemplate.send("product.updated", event.getId(), event.toByteArray());
         } catch (Exception e) {
             log.error("Error sending ProductUpdated event: {}", event, e);
+        }
+    }
+
+    public void sendProductDeletedEvent(com.bob.productservice.model.Product productEntity) {
+        try {
+            ProductDeletedEvent event = ProductDeletedEvent.newBuilder()
+                    .setProductId(productEntity.getId().toString())
+                    .setProductName(productEntity.getName())
+                    .setEventType("DELETED")
+                    .setTimestamp(Instant.now().toString())
+                    .build();
+
+            log.info("Publishing product.deleted event for Product ID: {}", event.getProductId());
+
+            // Send to "product.deleted" topic
+            kafkaTemplate.send("product.deleted", event.getProductId(), event.toByteArray());
+
+        } catch (Exception e) {
+            log.error("Error sending ProductDeleted event", e);
         }
     }
 }

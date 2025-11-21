@@ -49,6 +49,7 @@ public class ProductServiceImpl implements ProductService {
     public void deleteProductById(UUID id) {
         Product product = getProduct(id);
         productRepository.delete(product);
+        kafkaProducer.sendProductDeletedEvent(product);
     }
 
     @Override

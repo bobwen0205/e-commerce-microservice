@@ -53,3 +53,10 @@ message CartItemValidationResult {
   string currentPrice = 4; // To handle price changes
   int32 availableQuantity = 5;
 }
+
+message ProductDeletedEvent {
+  string productId = 1;
+  string productName = 2;
+  string eventType = 3; // "DELETED"
+  string timestamp = 4;
+}

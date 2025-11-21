@@ -13,6 +13,7 @@ import com.bob.product.proto.CartItemValidationResult;
 import com.bob.product.proto.Product;
 import com.bob.product.proto.ValidateCartItemsResponse;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -20,6 +21,7 @@ import java.util.*;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class CartServiceImpl implements CartService {
 
     private final RedisCartRepository cartRepository;
@@ -225,5 +227,33 @@ public class CartServiceImpl implements CartService {
         }
 
         return mapToResponse(cart);
+    }
+
+    @Override
+    public void handleProductDeletion(String productId) {
+        // 1. Use the Index to find ONLY relevant users (Avoids scanning all keys)
+        //
+        Set<String> userIds = cartRepository.getUsersWithProduct(productId);
+
+        log.info("Removing deleted product {} from {} active carts", productId, userIds.size());
+
+        for (String userId : userIds) {
+            cartRepository.findByUserId(userId).ifPresent(cart -> {
+
+                // Remove item
+                boolean removed = cart.getItems().removeIf(item -> item.getProductId().equals(productId));
+
+                if (removed) {
+                    // Recalculate totals (Total Amount, Total Quantity)
+                    calculateTotals(cart);
+
+                    // Save updated cart
+                    cartRepository.save(cart);
+
+                    // Clean up the index for this specific user/product pair
+                    cartRepository.removeProductFromCartIndex(productId, userId);
+                }
+            });
+        }
     }
 }
